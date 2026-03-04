@@ -1,12 +1,25 @@
-# movie_recommender.py
+#!/usr/bin/env python3
 """
+movie_recommender.py
+
 HW1 Movie Recommendation System (Prototype)
 
 Data files:
 - Movies:  movie_genre|movie_id|movie_name
 - Ratings: movie_name|rating|user_id
 
-This program provides a CLI to load data and run recommendation-related features.
+Edge-case handling:
+- Skips malformed lines (wrong field count, empty required fields)
+- Movies:
+  - Movie names are treated case-sensitive identifiers.
+  - Leading/trailing whitespace is stripped.
+  - Duplicate movie names are skipped (first one wins) to avoid double-adding to genre lists.
+- Ratings:
+  - Rating must be numeric float in [0, 5]
+  - Skips ratings for unknown movies (not present in movies file)
+  - Enforces user can rate a given movie only once (duplicate skipped)
+- Genre input to queries is case-insensitive.
+
 Compatible with Python 3.12.
 """
 
@@ -14,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
+import os
 
 
 @dataclass(frozen=True)
@@ -32,6 +46,16 @@ class Rating:
     user_id: str
 
 
+def _canon_movie_name(name: str) -> str:
+    """Movie names are case-sensitive; only strip outer whitespace."""
+    return name.strip()
+
+
+def _genre_key(genre: str) -> str:
+    """Normalize genre for case-insensitive matching."""
+    return genre.strip().lower()
+
+
 class MovieRecommender:
     """
     Stores loaded movies/ratings and provides methods to compute popularity,
@@ -40,11 +64,12 @@ class MovieRecommender:
 
     def __init__(self) -> None:
         # Movies
-        self.movies_by_name: Dict[str, Movie] = {}
-        self.movies_by_genre: Dict[str, List[str]] = {}  # genre -> [movie_name]
+        self.movies_by_name: Dict[str, Movie] = {}           # movie_name -> Movie
+        self.genre_display_by_key: Dict[str, str] = {}       # normalized genre -> display casing
+        self.movies_by_genre_key: Dict[str, List[str]] = {}  # normalized genre -> [movie_name]
 
         # Ratings
-        self.ratings_by_movie: Dict[str, List[float]] = {}  # movie_name -> [ratings]
+        self.ratings_by_movie: Dict[str, List[float]] = {}   # movie_name -> [ratings]
         self.ratings_by_user: Dict[str, Dict[str, float]] = {}  # user_id -> {movie_name: rating}
 
     def reset(self) -> None:
@@ -65,13 +90,16 @@ class MovieRecommender:
         Returns:
             (loaded_count, skipped_count)
         """
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+
         loaded = 0
         skipped = 0
 
         with open(path, "r", encoding="utf-8") as f:
             for _line_num, raw in enumerate(f, start=1):
-                line = raw.strip()
-                if not line:
+                line = raw.rstrip("\n")
+                if not line.strip():
                     continue
 
                 parts = line.split("|")
@@ -79,14 +107,25 @@ class MovieRecommender:
                     skipped += 1
                     continue
 
-                genre, movie_id, movie_name = (p.strip() for p in parts)
+                genre_raw, movie_id_raw, movie_name_raw = parts
+                genre = genre_raw.strip()
+                movie_id = movie_id_raw.strip()
+                movie_name = _canon_movie_name(movie_name_raw)
+
                 if not genre or not movie_id or not movie_name:
                     skipped += 1
                     continue
 
-                # If duplicates exist, last one wins (simple policy).
+                # Duplicate movie name: skip to avoid corrupting movies_by_genre lists.
+                if movie_name in self.movies_by_name:
+                    skipped += 1
+                    continue
+
+                gk = _genre_key(genre)
+                self.genre_display_by_key.setdefault(gk, genre)
+
                 self.movies_by_name[movie_name] = Movie(genre=genre, movie_id=movie_id, name=movie_name)
-                self.movies_by_genre.setdefault(genre, []).append(movie_name)
+                self.movies_by_genre_key.setdefault(gk, []).append(movie_name)
                 loaded += 1
 
         return loaded, skipped
@@ -101,13 +140,16 @@ class MovieRecommender:
         Returns:
             (loaded_count, skipped_count)
         """
+        if not os.path.exists(path):
+            raise FileNotFoundError(path)
+
         loaded = 0
         skipped = 0
 
         with open(path, "r", encoding="utf-8") as f:
             for _line_num, raw in enumerate(f, start=1):
-                line = raw.strip()
-                if not line:
+                line = raw.rstrip("\n")
+                if not line.strip():
                     continue
 
                 parts = line.split("|")
@@ -115,7 +157,11 @@ class MovieRecommender:
                     skipped += 1
                     continue
 
-                movie_name, rating_str, user_id = (p.strip() for p in parts)
+                movie_name_raw, rating_str_raw, user_id_raw = parts
+                movie_name = _canon_movie_name(movie_name_raw)
+                rating_str = rating_str_raw.strip()
+                user_id = user_id_raw.strip()
+
                 if not movie_name or not rating_str or not user_id:
                     skipped += 1
                     continue
@@ -127,6 +173,11 @@ class MovieRecommender:
                     continue
 
                 if rating < 0 or rating > 5:
+                    skipped += 1
+                    continue
+
+                # IMPORTANT: skip ratings for movies not in movies file.
+                if movie_name not in self.movies_by_name:
                     skipped += 1
                     continue
 
@@ -145,7 +196,7 @@ class MovieRecommender:
     def data_summary(self) -> str:
         """Return a short summary of currently loaded data."""
         num_movies = len(self.movies_by_name)
-        num_genres = len(self.movies_by_genre)
+        num_genres = len(self.genre_display_by_key)
         num_users = len(self.ratings_by_user)
         num_ratings = sum(len(v) for v in self.ratings_by_movie.values())
         return (
@@ -168,7 +219,7 @@ class MovieRecommender:
 
         Notes:
             - Does not round averages.
-            - Only includes movies that appear in the ratings file.
+            - Only includes movies that have at least 1 rating.
         """
         stats: Dict[str, Tuple[float, int]] = {}
         for movie_name, vals in self.ratings_by_movie.items():
@@ -182,16 +233,9 @@ class MovieRecommender:
         """
         Return the top n movies ranked by average rating.
 
-        Args:
-            n: number of movies to return (if n <= 0 returns [])
-
-        Returns:
-            List of (movie_name, avg_rating, rating_count)
-
-        Tie-breakers (deterministic):
+        Tie-breakers:
             1) higher avg_rating
-            2) higher rating_count
-            3) alphabetical movie_name
+            2) alphabetical movie_name
         """
         if n <= 0:
             return []
@@ -199,7 +243,7 @@ class MovieRecommender:
         stats = self.movie_stats()
         ranked = sorted(
             ((name, avg, cnt) for name, (avg, cnt) in stats.items()),
-            key=lambda t: (-t[1], -t[2], t[0])
+            key=lambda t: (-t[1], t[0]),
         )
         return ranked[:n]
 
@@ -212,27 +256,29 @@ class MovieRecommender:
         Return the top n movies within a genre ranked by average rating.
 
         Args:
-            genre: genre name exactly as in movies file (case-sensitive)
+            genre: genre name (matched case-insensitively)
             n: number of movies to return
 
         Returns:
             List of (movie_name, avg_rating, rating_count)
 
         Notes:
-            - Only movies in that genre that ALSO have ratings will appear.
+            - Only includes movies in that genre that ALSO have ratings.
         """
         if n <= 0:
             return []
 
+        gk = _genre_key(genre)
+        candidates = self.movies_by_genre_key.get(gk, [])
         stats = self.movie_stats()
-        candidates = self.movies_by_genre.get(genre, [])
+
         ranked: List[Tuple[str, float, int]] = []
         for name in candidates:
             if name in stats:
                 avg, cnt = stats[name]
                 ranked.append((name, avg, cnt))
 
-        ranked.sort(key=lambda t: (-t[1], -t[2], t[0]))
+        ranked.sort(key=lambda t: (-t[1], t[0]))
         return ranked[:n]
 
     # -----------------------
@@ -245,37 +291,32 @@ class MovieRecommender:
             average of (average movie ratings) within that genre.
 
         Returns:
-            Dict mapping genre -> popularity_score (float, not rounded)
+            Dict mapping genre_display -> popularity_score (float, not rounded)
 
         Notes:
             - Uses each movie's average rating (across all users).
             - Only counts movies that have at least 1 rating.
-            - Ignores ratings for movies not present in the movies file.
         """
         stats = self.movie_stats()
+        gk_to_avgs: Dict[str, List[float]] = {}
 
-        genre_to_movie_avgs: Dict[str, List[float]] = {}
         for movie_name, (avg, _cnt) in stats.items():
-            movie = self.movies_by_name.get(movie_name)
-            if movie is None:
+            mv = self.movies_by_name.get(movie_name)
+            if mv is None:
                 continue
-            genre_to_movie_avgs.setdefault(movie.genre, []).append(avg)
+            gk = _genre_key(mv.genre)
+            gk_to_avgs.setdefault(gk, []).append(avg)
 
         out: Dict[str, float] = {}
-        for g, avgs in genre_to_movie_avgs.items():
+        for gk, avgs in gk_to_avgs.items():
             if avgs:
-                out[g] = sum(avgs) / len(avgs)
+                display = self.genre_display_by_key.get(gk, gk)
+                out[display] = sum(avgs) / len(avgs)
         return out
 
     def top_n_genres(self, n: int) -> List[Tuple[str, float]]:
         """
         Return top n genres ranked by genre popularity.
-
-        Args:
-            n: number of genres
-
-        Returns:
-            List of (genre, popularity_score)
 
         Tie-breakers:
             1) higher popularity_score
@@ -296,44 +337,57 @@ class MovieRecommender:
         """
         Compute the user's most preferred genre.
 
-        For each genre, compute:
-            average of the user's ratings for movies in that genre
-        and return the genre with the highest average.
-
-        Args:
-            user_id: user id as string (since we store ids as strings)
+        ASSIGNMENT definition:
+            For each genre, compute the average of the GLOBAL movie-average-ratings
+            for movies in that genre that the user rated.
+            Then choose the genre with the highest value.
 
         Returns:
-            (best_genre, avg_user_rating_in_genre) or None if user has no usable ratings.
+            (best_genre_display, preference_score) or None if user has no usable ratings.
 
         Tie-breakers:
-            1) higher avg rating in genre
-            2) genre name alphabetical
+            1) higher preference_score
+            2) alphabetical genre display
         """
         user_ratings = self.ratings_by_user.get(user_id)
         if not user_ratings:
             return None
 
-        genre_to_vals: Dict[str, List[float]] = {}
-        for movie_name, r in user_ratings.items():
-            movie = self.movies_by_name.get(movie_name)
-            if movie is None:
+        stats = self.movie_stats()  # global movie averages
+
+        gk_to_sum: Dict[str, float] = {}
+        gk_to_cnt: Dict[str, int] = {}
+
+        for movie_name in user_ratings.keys():
+            mv = self.movies_by_name.get(movie_name)
+            if mv is None:
                 continue
-            genre_to_vals.setdefault(movie.genre, []).append(r)
+            if movie_name not in stats:
+                continue
+            avg, _cnt = stats[movie_name]
+            gk = _genre_key(mv.genre)
+            gk_to_sum[gk] = gk_to_sum.get(gk, 0.0) + avg
+            gk_to_cnt[gk] = gk_to_cnt.get(gk, 0) + 1
 
-        if not genre_to_vals:
+        if not gk_to_cnt:
             return None
 
-        genre_to_avg: List[Tuple[str, float]] = []
-        for g, vals in genre_to_vals.items():
-            if vals:
-                genre_to_avg.append((g, sum(vals) / len(vals)))
+        best_display: Optional[str] = None
+        best_score: Optional[float] = None
 
-        if not genre_to_avg:
-            return None
+        for gk, cnt in gk_to_cnt.items():
+            score = gk_to_sum[gk] / cnt
+            display = self.genre_display_by_key.get(gk, gk)
+            if (
+                best_score is None
+                or score > best_score
+                or (score == best_score and display < (best_display or ""))
+            ):
+                best_score = score
+                best_display = display
 
-        genre_to_avg.sort(key=lambda t: (-t[1], t[0]))
-        return genre_to_avg[0]
+        assert best_display is not None and best_score is not None
+        return best_display, best_score
 
     # -----------------------
     # Recommend movies
@@ -343,21 +397,10 @@ class MovieRecommender:
         """
         Recommend up to k movies for the user:
 
-        - Find user's top genre (by average of user's ratings in that genre)
-        - From that genre, pick the most popular movies (by average rating overall)
+        - Find user's top genre (per user_genre_preference)
+        - From that genre, pick the most popular movies (by global avg rating)
           that the user has NOT rated yet.
-        - Return up to k results.
-
-        Args:
-            user_id: user id as string
-            k: number of recommendations (default 3)
-
-        Returns:
-            List of (movie_name, avg_rating, rating_count)
-
-        Notes:
-            - If user has no ratings, returns [].
-            - If user's top genre has fewer than k unseen rated movies, returns fewer.
+        - Return up to k results as (movie_name, avg_rating, rating_count)
         """
         if k <= 0:
             return []
@@ -366,13 +409,23 @@ class MovieRecommender:
         if pref is None:
             return []
 
-        top_genre, _score = pref
-        already_rated = set(self.ratings_by_user.get(user_id, {}).keys())
+        top_genre_display, _score = pref
+        gk = _genre_key(top_genre_display)
 
-        # Start with ranked movies in that genre (by avg rating overall)
-        ranked_in_genre = self.top_n_movies_in_genre(top_genre, n=10**9)  # effectively "all"
-        unseen = [t for t in ranked_in_genre if t[0] not in already_rated]
-        return unseen[:k]
+        already_rated = set(self.ratings_by_user.get(user_id, {}).keys())
+        stats = self.movie_stats()
+
+        candidates: List[Tuple[str, float, int]] = []
+        for movie_name in self.movies_by_genre_key.get(gk, []):
+            if movie_name in already_rated:
+                continue
+            if movie_name not in stats:
+                continue
+            avg, cnt = stats[movie_name]
+            candidates.append((movie_name, avg, cnt))
+
+        candidates.sort(key=lambda t: (-t[1], t[0]))
+        return candidates[:k]
 
 
 def run_cli() -> None:
@@ -432,7 +485,7 @@ def run_cli() -> None:
                 print(f"{name} | avg={avg} | count={cnt}")
 
         elif choice == "6":
-            genre = input("Genre (case-sensitive): ").strip()
+            genre = input("Genre: ").strip()
             try:
                 n = int(input("N: ").strip())
             except ValueError:
@@ -457,7 +510,7 @@ def run_cli() -> None:
                 print("No preference found (user missing or no usable ratings).")
             else:
                 g, avg = pref
-                print(f"Top genre for user {user_id}: {g} (avg={avg})")
+                print(f"Top genre for user {user_id}: {g} (score={avg})")
 
         elif choice == "9":
             user_id = input("User id: ").strip()
