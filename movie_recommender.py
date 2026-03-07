@@ -2,7 +2,7 @@
 """
 movie_recommender.py
 
-HW1 Movie Recommendation System (Prototype)
+HW1 Movie Recommendation System! (Prototype)
 
 Data files:
 - Movies:  movie_genre|movie_id|movie_name
