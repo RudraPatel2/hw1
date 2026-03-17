@@ -8,11 +8,11 @@ Usage:
     python test_movie_recommender.py
 
 Assumes movie_recommender.py defines a class MovieRecommender with methods:
-- load_movies(path) -> (loaded_count, skipped_count)
-- load_ratings(path) -> (loaded_count, skipped_count)
+- load_movies(path) -> (loaded_count, skipped_count).
+- load_ratings(path) -> (loaded_count, skipped_count).
 - data_summary() -> str
 - top_n_movies(n) -> list[(movie_name, avg, count)]
-- top_n_movies_in_genre(genre, n) -> list[(movie_name, avg, count)]
+- top_n_movies_in_genre(genre, n) -> list[(movie_name, avg, count)].
 - top_n_genres(n) -> list[(genre, avg)]
 - user_genre_preference(user_id) -> (genre, score) or None
 - recommend_movies_for_user(user_id, k) -> list[(movie_name, avg, count)] or list[(movie_name, avg)] depending on your implementation
